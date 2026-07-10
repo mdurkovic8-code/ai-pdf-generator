@@ -236,6 +236,20 @@
       position: relative;
     }
 
+    .paper,
+    .paper * {
+      user-select: text;
+      -webkit-user-select: text;
+    }
+
+    .paper::before,
+    .paper::after,
+    .paper *::before,
+    .paper *::after {
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
     .cover-page {
       min-height: 250mm;
       display: flex;
@@ -795,6 +809,8 @@
         margin: 0;
         border: 0;
         box-shadow: none;
+        user-select: text;
+        -webkit-user-select: text;
       }
 
       .doc {
