@@ -182,6 +182,34 @@
       background: #e2e8f0;
     }
 
+    .btn-secondary:hover {
+      background: #cbd5e1;
+    }
+
+    .btn:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
+
+    .bookmark-status {
+      display: none;
+      margin-top: -5px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .bookmark-status.is-visible {
+      display: block;
+    }
+
+    .bookmark-status.is-success {
+      color: #166534;
+    }
+
+    .bookmark-status.is-error {
+      color: #b42318;
+    }
+
     .hint {
       color: var(--muted);
       font-size: 13px;
@@ -962,13 +990,18 @@ print(response.json())
 
       <div class="actions">
         <button class="btn btn-primary" id="printBtn" type="button">Exportovať PDF</button>
+        <button class="btn btn-secondary" id="bookmarkBtn" type="button" title="Vybrať uložené PDF a doplniť navigačné záložky">Doplniť záložky</button>
         <button class="btn btn-secondary" id="sampleBtn" type="button">Vložiť ukážku</button>
         <button class="btn btn-secondary" id="clearBtn" type="button">Vyčistiť</button>
+        <input id="pdfInput" type="file" accept="application/pdf,.pdf" hidden>
       </div>
+
+      <div class="bookmark-status" id="bookmarkStatus" role="status" aria-live="polite"></div>
 
       <div class="export-tips">
         <strong>Kontrola pred exportom</strong>
         <ul>
+          <li>Prehliadač: Microsoft Edge alebo Google Chrome</li>
           <li>Cieľ: Uložiť ako PDF</li>
           <li>Veľkosť papiera: A4</li>
           <li>Farby: zapnuté</li>
@@ -984,10 +1017,14 @@ print(response.json())
     </section>
   </main>
 
+  <script src="assets/vendor/pdf-lib.min.js"></script>
   <script>
     const source = document.getElementById("source");
     const preview = document.getElementById("documentPreview");
     const printBtn = document.getElementById("printBtn");
+    const bookmarkBtn = document.getElementById("bookmarkBtn");
+    const pdfInput = document.getElementById("pdfInput");
+    const bookmarkStatus = document.getElementById("bookmarkStatus");
     const sampleBtn = document.getElementById("sampleBtn");
     const clearBtn = document.getElementById("clearBtn");
 
@@ -1139,6 +1176,255 @@ print(response.json())
       }
 
       return headings;
+    }
+
+    function extractOutlineEntries(text) {
+      const documentParts = getDocumentParts(text);
+      const entries = [{
+        title: documentParts.title,
+        level: 1
+      }];
+      const lines = documentParts.body.replace(/\r\n/g, "\n").split("\n");
+      let inCode = false;
+
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+
+        if (trimmed.startsWith("```")) {
+          inCode = !inCode;
+          continue;
+        }
+
+        if (inCode) {
+          continue;
+        }
+
+        const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+
+        if (heading) {
+          entries.push({
+            title: cleanTitle(heading[2]),
+            level: getHeadingLevel(heading[1], heading[2].trim())
+          });
+        }
+      }
+
+      return entries;
+    }
+
+    function setBookmarkStatus(message, type = "") {
+      bookmarkStatus.textContent = message;
+      bookmarkStatus.className = `bookmark-status is-visible${type ? ` is-${type}` : ""}`;
+    }
+
+    function resolvePdfObject(object, context) {
+      return object instanceof PDFLib.PDFRef ? context.lookup(object) : object;
+    }
+
+    function findPageReference(object, context) {
+      const resolved = resolvePdfObject(object, context);
+
+      if (resolved instanceof PDFLib.PDFDict) {
+        const pageReference = resolved.get(PDFLib.PDFName.of("Pg"));
+
+        if (pageReference instanceof PDFLib.PDFRef) {
+          return pageReference;
+        }
+
+        return findPageReference(resolved.get(PDFLib.PDFName.of("K")), context);
+      }
+
+      if (resolved instanceof PDFLib.PDFArray) {
+        for (let index = 0; index < resolved.size(); index += 1) {
+          const pageReference = findPageReference(resolved.get(index), context);
+
+          if (pageReference) {
+            return pageReference;
+          }
+        }
+      }
+
+      return null;
+    }
+
+    function collectPdfHeadings(pdfDocument) {
+      const context = pdfDocument.context;
+      const structureRoot = pdfDocument.catalog.get(PDFLib.PDFName.of("StructTreeRoot"));
+      const headings = [];
+
+      if (!structureRoot) {
+        return headings;
+      }
+
+      function walk(object) {
+        const resolved = resolvePdfObject(object, context);
+
+        if (resolved instanceof PDFLib.PDFArray) {
+          for (let index = 0; index < resolved.size(); index += 1) {
+            walk(resolved.get(index));
+          }
+          return;
+        }
+
+        if (!(resolved instanceof PDFLib.PDFDict)) {
+          return;
+        }
+
+        const role = resolvePdfObject(resolved.get(PDFLib.PDFName.of("S")), context);
+        const roleName = role instanceof PDFLib.PDFName ? role.toString() : "";
+
+        if (/^\/H[1-6]$/.test(roleName)) {
+          const pageReference = findPageReference(resolved, context);
+
+          if (pageReference) {
+            headings.push({
+              level: Number(roleName.slice(2)),
+              pageReference
+            });
+          }
+        }
+
+        walk(resolved.get(PDFLib.PDFName.of("K")));
+      }
+
+      walk(structureRoot);
+      return headings;
+    }
+
+    function buildOutlineTree(entries) {
+      const roots = [];
+      const stack = [];
+
+      for (const entry of entries) {
+        const node = { ...entry, children: [] };
+
+        while (stack.length && stack[stack.length - 1].level >= node.level) {
+          stack.pop();
+        }
+
+        if (stack.length) {
+          stack[stack.length - 1].children.push(node);
+        } else {
+          roots.push(node);
+        }
+
+        stack.push(node);
+      }
+
+      return roots;
+    }
+
+    function addPdfOutline(pdfDocument, entries) {
+      const context = pdfDocument.context;
+      const outlineRoot = PDFLib.PDFDict.withContext(context);
+      const outlineRootReference = context.register(outlineRoot);
+      const tree = buildOutlineTree(entries);
+
+      outlineRoot.set(PDFLib.PDFName.of("Type"), PDFLib.PDFName.of("Outlines"));
+
+      function descendantCount(node) {
+        return node.children.reduce((total, child) => total + 1 + descendantCount(child), 0);
+      }
+
+      function registerNodes(nodes, parentReference) {
+        for (const node of nodes) {
+          const dictionary = PDFLib.PDFDict.withContext(context);
+          const destination = PDFLib.PDFArray.withContext(context);
+
+          destination.push(node.pageReference);
+          destination.push(PDFLib.PDFName.of("Fit"));
+          dictionary.set(PDFLib.PDFName.of("Title"), PDFLib.PDFHexString.fromText(node.title));
+          dictionary.set(PDFLib.PDFName.of("Parent"), parentReference);
+          dictionary.set(PDFLib.PDFName.of("Dest"), destination);
+          node.dictionary = dictionary;
+          node.reference = context.register(dictionary);
+          registerNodes(node.children, node.reference);
+        }
+      }
+
+      function linkNodes(nodes) {
+        nodes.forEach((node, index) => {
+          if (index > 0) {
+            node.dictionary.set(PDFLib.PDFName.of("Prev"), nodes[index - 1].reference);
+          }
+
+          if (index < nodes.length - 1) {
+            node.dictionary.set(PDFLib.PDFName.of("Next"), nodes[index + 1].reference);
+          }
+
+          if (node.children.length) {
+            node.dictionary.set(PDFLib.PDFName.of("First"), node.children[0].reference);
+            node.dictionary.set(PDFLib.PDFName.of("Last"), node.children[node.children.length - 1].reference);
+            node.dictionary.set(PDFLib.PDFName.of("Count"), PDFLib.PDFNumber.of(descendantCount(node)));
+            linkNodes(node.children);
+          }
+        });
+      }
+
+      registerNodes(tree, outlineRootReference);
+      linkNodes(tree);
+
+      if (tree.length) {
+        outlineRoot.set(PDFLib.PDFName.of("First"), tree[0].reference);
+        outlineRoot.set(PDFLib.PDFName.of("Last"), tree[tree.length - 1].reference);
+        outlineRoot.set(
+          PDFLib.PDFName.of("Count"),
+          PDFLib.PDFNumber.of(tree.reduce((total, node) => total + 1 + descendantCount(node), 0))
+        );
+      }
+
+      pdfDocument.catalog.set(PDFLib.PDFName.of("Outlines"), outlineRootReference);
+      pdfDocument.catalog.set(PDFLib.PDFName.of("PageMode"), PDFLib.PDFName.of("UseOutlines"));
+    }
+
+    async function createBookmarkedPdf(file) {
+      if (!window.PDFLib) {
+        throw new Error("Modul na spracovanie PDF sa nepodarilo načítať.");
+      }
+
+      const expectedEntries = extractOutlineEntries(source.value);
+      const pdfDocument = await PDFLib.PDFDocument.load(await file.arrayBuffer(), {
+        updateMetadata: false
+      });
+      const pdfHeadings = collectPdfHeadings(pdfDocument);
+      const pdfTitle = pdfDocument.getTitle();
+
+      if (pdfTitle && plainText(pdfTitle) !== plainText(expectedEntries[0].title)) {
+        throw new Error("Vybrané PDF patrí k inému dokumentu. Vyber PDF vytvorené z aktuálneho textu.");
+      }
+
+      if (!pdfHeadings.length) {
+        throw new Error("PDF neobsahuje štruktúru nadpisov. Vytvor ho cez Edge alebo Chrome pomocou Uložiť ako PDF.");
+      }
+
+      if (pdfHeadings.length !== expectedEntries.length) {
+        throw new Error("Text v generátore nezodpovedá vybranému PDF. Najprv znova exportuj aktuálny dokument.");
+      }
+
+      addPdfOutline(
+        pdfDocument,
+        expectedEntries.map((entry, index) => ({
+          ...entry,
+          level: pdfHeadings[index].level,
+          pageReference: pdfHeadings[index].pageReference
+        }))
+      );
+
+      return pdfDocument.save();
+    }
+
+    function downloadPdf(bytes, originalName) {
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const baseName = originalName.replace(/\.pdf$/i, "");
+
+      link.href = url;
+      link.download = `${baseName}-so-zalozkami.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
     function renderToc(headings) {
@@ -1454,6 +1740,8 @@ print(response.json())
       const levelMeta = detectedLevel ? `<span>Úroveň: ${escapeHtml(detectedLevel)}</span>` : "";
       const toc = renderToc(extractHeadings(documentParts.body));
 
+      document.title = documentParts.title;
+
       preview.innerHTML = `
         <section class="cover-page">
           <header class="cover">
@@ -1495,6 +1783,30 @@ print(response.json())
     });
 
     printBtn.addEventListener("click", () => window.print());
+    bookmarkBtn.addEventListener("click", () => {
+      pdfInput.value = "";
+      pdfInput.click();
+    });
+    pdfInput.addEventListener("change", async () => {
+      const [file] = pdfInput.files;
+
+      if (!file) {
+        return;
+      }
+
+      bookmarkBtn.disabled = true;
+      setBookmarkStatus("Dopĺňam záložky...");
+
+      try {
+        const pdfBytes = await createBookmarkedPdf(file);
+        downloadPdf(pdfBytes, file.name);
+        setBookmarkStatus("Hotovo. PDF so záložkami bolo uložené.", "success");
+      } catch (error) {
+        setBookmarkStatus(error.message || "Záložky sa nepodarilo doplniť.", "error");
+      } finally {
+        bookmarkBtn.disabled = false;
+      }
+    });
     sampleBtn.addEventListener("click", () => {
       source.value = sampleText;
       render();
