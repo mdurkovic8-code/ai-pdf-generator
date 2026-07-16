@@ -1,29 +1,34 @@
-# Generator PDF skript
+# Generátor PDF skrípt
 
-Tento priecinok obsahuje webovu verziu generatora PDF skript.
+Webová aplikácia premieňa vložený Markdown text na jednotne formátované učebné PDF dokumenty v slovenčine.
 
-## Ako spustit lokalne
+## Použitie
 
-1. Otvor subor `index.html` v prehliadaci.
-2. Vloz text skript.
-3. Klikni na export a v Edge alebo Chrome vyber `Ulozit ako PDF`.
-4. Tlacidlom `Doplnit zalozky` vyber ulozene PDF. Generator stiahne novu verziu so zalozkami podla nadpisov dokumentu.
+1. Otvor generátor v prehliadači.
+2. Vlož text skrípt.
+3. Klikni na **Vytvoriť PDF so záložkami**.
+4. Generátor stiahne hotové PDF s kopírovateľným textom a navigačnými záložkami podľa nadpisov.
 
-Povodne PDF zostane nezmenene. Pridanie zaloziek prebieha priamo v prehliadaci a subor sa neposiela na server.
+Hlavný export odošle pripravený obsah do služby Cloudflare iba na vytvorenie PDF. Aplikácia dokumenty neukladá a odpoveď servera má vypnuté ukladanie do vyrovnávacej pamäte.
 
-## Ako zverejnit na webe
+## Záložné možnosti
 
-Nahraj na hosting cely obsah tohto priecinka:
+- **Pôvodný export** otvorí tlačový dialóg prehliadača.
+- **Doplniť záložky** pridá záložky do už uloženého PDF priamo v prehliadači. Vybraný súbor sa pri tomto postupe neposiela na server.
 
-- `index.html`
-- `assets/ai-learning-cover.png`
-- `assets/vendor/pdf-lib.min.js`
-- `assets/vendor/pdf-lib-LICENSE.md`
+## Prevádzka
 
-Najjednoduchsie moznosti:
+- Webová aplikácia je zverejnená cez GitHub Pages.
+- `config.js` obsahuje adresu PDF služby.
+- Priečinok `worker` obsahuje Cloudflare Worker s Browser Rendering.
 
-- Netlify Drop: pretiahni cely priecinok do Netlify.
-- GitHub Pages: nahraj priecinok do repozitara a zapni Pages.
-- Klasicky webhosting: nahraj subory cez spravcu suborov alebo FTP.
+Lokálna kontrola a nasadenie služby:
 
-Generator funguje priamo v prehliadaci. Vlozeny text sa neposiela na server.
+```powershell
+cd worker
+npm.cmd install
+npm.cmd run check
+npm.cmd run deploy
+```
+
+Cloudflare Worker povoľuje požiadavky z GitHub Pages a z lokálneho testovacieho servera na porte `8011`.

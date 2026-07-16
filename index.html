@@ -989,7 +989,8 @@ print(response.json())
       </div>
 
       <div class="actions">
-        <button class="btn btn-primary" id="printBtn" type="button">Exportovať PDF</button>
+        <button class="btn btn-primary" id="serverExportBtn" type="button">Vytvoriť PDF so záložkami</button>
+        <button class="btn btn-secondary" id="printBtn" type="button">Pôvodný export</button>
         <button class="btn btn-secondary" id="bookmarkBtn" type="button" title="Vybrať uložené PDF a doplniť navigačné záložky">Doplniť záložky</button>
         <button class="btn btn-secondary" id="sampleBtn" type="button">Vložiť ukážku</button>
         <button class="btn btn-secondary" id="clearBtn" type="button">Vyčistiť</button>
@@ -999,8 +1000,9 @@ print(response.json())
       <div class="bookmark-status" id="bookmarkStatus" role="status" aria-live="polite"></div>
 
       <div class="export-tips">
-        <strong>Kontrola pred exportom</strong>
+        <strong>Záložný spôsob exportu</strong>
         <ul>
+          <li>Použi ho iba vtedy, keď priame vytvorenie PDF nie je dostupné.</li>
           <li>Prehliadač: Microsoft Edge alebo Google Chrome</li>
           <li>Cieľ: Uložiť ako PDF</li>
           <li>Veľkosť papiera: A4</li>
@@ -1017,10 +1019,12 @@ print(response.json())
     </section>
   </main>
 
+  <script src="config.js"></script>
   <script src="assets/vendor/pdf-lib.min.js"></script>
   <script>
     const source = document.getElementById("source");
     const preview = document.getElementById("documentPreview");
+    const serverExportBtn = document.getElementById("serverExportBtn");
     const printBtn = document.getElementById("printBtn");
     const bookmarkBtn = document.getElementById("bookmarkBtn");
     const pdfInput = document.getElementById("pdfInput");
@@ -1029,6 +1033,7 @@ print(response.json())
     const clearBtn = document.getElementById("clearBtn");
 
     const sampleText = source.value;
+    const pdfApiUrl = String(window.PDF_API_URL || "").replace(/\/$/, "");
 
     function escapeHtml(value) {
       return value
@@ -1427,6 +1432,94 @@ print(response.json())
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
+    function getSafePdfName() {
+      const title = getDocumentParts(source.value).title
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 90);
+
+      return `${title || "ucebne-skripta"}.pdf`;
+    }
+
+    function buildServerPdfHtml() {
+      const styles = Array.from(document.querySelectorAll("style"))
+        .map((style) => style.textContent)
+        .join("\n");
+      const baseUrl = location.protocol === "http:" || location.protocol === "https:"
+        ? new URL("./", location.href).href
+        : "https://mdurkovic8-code.github.io/ai-pdf-generator/";
+
+      return `<!doctype html>
+        <html lang="sk">
+          <head>
+            <meta charset="utf-8">
+            <base href="${escapeHtml(baseUrl)}">
+            <title>${escapeHtml(getDocumentParts(source.value).title)}</title>
+            <style>${styles}</style>
+          </head>
+          <body>
+            <main class="app">
+              <section class="preview-shell">
+                <article class="paper">
+                  <div class="doc">${preview.innerHTML}</div>
+                </article>
+              </section>
+            </main>
+          </body>
+        </html>`;
+    }
+
+    function downloadServerPdf(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function createPdfOnServer() {
+      if (!pdfApiUrl) {
+        throw new Error("Priame vytvorenie PDF ešte nie je pripojené. Zatiaľ použi Pôvodný export.");
+      }
+
+      if (!source.value.trim()) {
+        throw new Error("Najprv vlož text dokumentu.");
+      }
+
+      const filename = getSafePdfName();
+      const response = await fetch(`${pdfApiUrl}/pdf`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          filename,
+          html: buildServerPdfHtml()
+        })
+      });
+
+      if (!response.ok) {
+        let message = "PDF sa nepodarilo vytvoriť.";
+
+        try {
+          const error = await response.json();
+          message = error.error || message;
+        } catch (_) {
+          // Server nemusí pri technickej chybe vrátiť JSON.
+        }
+
+        throw new Error(message);
+      }
+
+      downloadServerPdf(await response.blob(), filename);
+    }
+
     function renderToc(headings) {
       return `
         <nav class="toc" aria-label="Obsah dokumentu">
@@ -1782,6 +1875,19 @@ print(response.json())
       element.addEventListener("change", render);
     });
 
+    serverExportBtn.addEventListener("click", async () => {
+      serverExportBtn.disabled = true;
+      setBookmarkStatus("Vytváram PDF so záložkami...");
+
+      try {
+        await createPdfOnServer();
+        setBookmarkStatus("Hotovo. PDF so záložkami bolo stiahnuté.", "success");
+      } catch (error) {
+        setBookmarkStatus(error.message || "PDF sa nepodarilo vytvoriť.", "error");
+      } finally {
+        serverExportBtn.disabled = false;
+      }
+    });
     printBtn.addEventListener("click", () => window.print());
     bookmarkBtn.addEventListener("click", () => {
       pdfInput.value = "";

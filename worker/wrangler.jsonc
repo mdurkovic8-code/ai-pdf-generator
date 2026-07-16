@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ai-pdf-generator-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "preview_urls": false,
+  "browser": {
+    "binding": "BROWSER"
+  }
+}
