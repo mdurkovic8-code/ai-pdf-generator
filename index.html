@@ -1058,6 +1058,13 @@ print(response.json())
         .trim();
     }
 
+    function cleanTocTitle(line) {
+      const title = cleanTitle(line);
+      const withoutNumber = title.replace(/^\s*\d+(?:\.\d+)*[.)]\s+/, "").trim();
+
+      return withoutNumber || title;
+    }
+
     function plainText(value) {
       return cleanTitle(value).replace(/[`*_]/g, "").trim();
     }
@@ -1174,7 +1181,7 @@ print(response.json())
           if (level === 2) {
             headings.push({
               id,
-              text: cleanTitle(text)
+              text: cleanTocTitle(text)
             });
           }
         }
