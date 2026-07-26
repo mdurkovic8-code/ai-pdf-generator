@@ -1454,6 +1454,53 @@ print(response.json())
       return `${title || "ucebne-skripta"}.pdf`;
     }
 
+    function prepareServerPdfContent() {
+      const container = document.createElement("div");
+      const codeBlocks = [];
+
+      container.innerHTML = preview.innerHTML;
+
+      for (const block of container.querySelectorAll(".code-block")) {
+        const code = block.querySelector("pre code");
+
+        if (!code) {
+          continue;
+        }
+
+        const lines = code.textContent.replace(/\r\n/g, "\n").split("\n");
+        const fragment = document.createDocumentFragment();
+
+        codeBlocks.push(lines);
+
+        for (const line of lines) {
+          const codeLine = document.createElement("span");
+
+          codeLine.className = "pdf-code-line";
+          codeLine.textContent = line || "\u00a0";
+          fragment.appendChild(codeLine);
+        }
+
+        code.replaceChildren(fragment);
+
+        const figure = document.createElement("figure");
+
+        for (const attribute of block.attributes) {
+          figure.setAttribute(attribute.name, attribute.value);
+        }
+
+        while (block.firstChild) {
+          figure.appendChild(block.firstChild);
+        }
+
+        block.replaceWith(figure);
+      }
+
+      return {
+        codeBlocks,
+        html: container.innerHTML
+      };
+    }
+
     function buildServerPdfHtml() {
       const styles = Array.from(document.querySelectorAll("style"))
         .map((style) => style.textContent)
@@ -1461,25 +1508,331 @@ print(response.json())
       const baseUrl = location.protocol === "http:" || location.protocol === "https:"
         ? new URL("./", location.href).href
         : "https://mdurkovic8-code.github.io/ai-pdf-generator/";
+      const pdfContent = prepareServerPdfContent();
 
-      return `<!doctype html>
-        <html lang="sk">
-          <head>
-            <meta charset="utf-8">
-            <base href="${escapeHtml(baseUrl)}">
-            <title>${escapeHtml(getDocumentParts(source.value).title)}</title>
-            <style>${styles}</style>
-          </head>
-          <body>
-            <main class="app">
-              <section class="preview-shell">
-                <article class="paper">
-                  <div class="doc">${preview.innerHTML}</div>
-                </article>
-              </section>
-            </main>
-          </body>
-        </html>`;
+      return {
+        codeBlocks: pdfContent.codeBlocks,
+        html: `<!doctype html>
+          <html lang="sk">
+            <head>
+              <meta charset="utf-8">
+              <base href="${escapeHtml(baseUrl)}">
+              <title>${escapeHtml(getDocumentParts(source.value).title)}</title>
+              <style>
+                ${styles}
+                .pdf-code-line {
+                  display: block;
+                  min-height: 1.56em;
+                  white-space: pre-wrap;
+                  word-break: break-word;
+                }
+              </style>
+            </head>
+            <body>
+              <main class="app">
+                <section class="preview-shell">
+                  <article class="paper">
+                    <div class="doc">${pdfContent.html}</div>
+                  </article>
+                </section>
+              </main>
+            </body>
+          </html>`
+      };
+    }
+
+    function pdfBytesToBinaryString(bytes) {
+      const chunkSize = 0x8000;
+      let result = "";
+
+      for (let index = 0; index < bytes.length; index += chunkSize) {
+        result += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+      }
+
+      return result;
+    }
+
+    function binaryStringToPdfBytes(value) {
+      const bytes = new Uint8Array(value.length);
+
+      for (let index = 0; index < value.length; index += 1) {
+        bytes[index] = value.charCodeAt(index) & 0xff;
+      }
+
+      return bytes;
+    }
+
+    function findPdfCodeNode(object, context) {
+      const resolved = resolvePdfObject(object, context);
+
+      if (resolved instanceof PDFLib.PDFArray) {
+        for (let index = 0; index < resolved.size(); index += 1) {
+          const codeNode = findPdfCodeNode(resolved.get(index), context);
+
+          if (codeNode) {
+            return codeNode;
+          }
+        }
+
+        return null;
+      }
+
+      if (!(resolved instanceof PDFLib.PDFDict)) {
+        return null;
+      }
+
+      const role = resolvePdfObject(resolved.get(PDFLib.PDFName.of("S")), context);
+
+      if (role instanceof PDFLib.PDFName && role.toString() === "/Code") {
+        return resolved;
+      }
+
+      return findPdfCodeNode(resolved.get(PDFLib.PDFName.of("K")), context);
+    }
+
+    function collectBlockCodeNodes(pdfDocument) {
+      const context = pdfDocument.context;
+      const structureRoot = pdfDocument.catalog.get(PDFLib.PDFName.of("StructTreeRoot"));
+      const codeNodes = [];
+
+      function walk(object) {
+        const resolved = resolvePdfObject(object, context);
+
+        if (resolved instanceof PDFLib.PDFArray) {
+          for (let index = 0; index < resolved.size(); index += 1) {
+            walk(resolved.get(index));
+          }
+          return;
+        }
+
+        if (!(resolved instanceof PDFLib.PDFDict)) {
+          return;
+        }
+
+        const role = resolvePdfObject(resolved.get(PDFLib.PDFName.of("S")), context);
+
+        if (role instanceof PDFLib.PDFName && role.toString() === "/Figure") {
+          const codeNode = findPdfCodeNode(
+            resolved.get(PDFLib.PDFName.of("K")),
+            context
+          );
+
+          if (codeNode) {
+            codeNodes.push(codeNode);
+          }
+          return;
+        }
+
+        walk(resolved.get(PDFLib.PDFName.of("K")));
+      }
+
+      if (structureRoot) {
+        walk(structureRoot);
+      }
+
+      return codeNodes;
+    }
+
+    function findMarkedContentTarget(object, context, inheritedPageReference = null) {
+      const resolved = resolvePdfObject(object, context);
+
+      if (resolved instanceof PDFLib.PDFArray) {
+        for (let index = 0; index < resolved.size(); index += 1) {
+          const target = findMarkedContentTarget(
+            resolved.get(index),
+            context,
+            inheritedPageReference
+          );
+
+          if (target) {
+            return target;
+          }
+        }
+
+        return null;
+      }
+
+      if (!(resolved instanceof PDFLib.PDFDict)) {
+        return null;
+      }
+
+      const ownPageReference = resolved.get(PDFLib.PDFName.of("Pg"));
+      const pageReference = ownPageReference instanceof PDFLib.PDFRef
+        ? ownPageReference
+        : inheritedPageReference;
+      const markedContentId = resolvePdfObject(
+        resolved.get(PDFLib.PDFName.of("MCID")),
+        context
+      );
+
+      if (pageReference && markedContentId instanceof PDFLib.PDFNumber) {
+        return {
+          mcid: Number(markedContentId.toString()),
+          pageReference
+        };
+      }
+
+      const child = resolvePdfObject(resolved.get(PDFLib.PDFName.of("K")), context);
+
+      if (pageReference && child instanceof PDFLib.PDFNumber) {
+        return {
+          mcid: Number(child.toString()),
+          pageReference
+        };
+      }
+
+      return findMarkedContentTarget(child, context, pageReference);
+    }
+
+    function collectCodeLineTargets(pdfDocument, codeBlocks) {
+      const context = pdfDocument.context;
+      const codeNodes = collectBlockCodeNodes(pdfDocument);
+      const targets = [];
+
+      if (codeNodes.length !== codeBlocks.length) {
+        throw new Error("PDF neobsahuje ocakavanu strukturu kodovych blokov.");
+      }
+
+      for (let blockIndex = 0; blockIndex < codeNodes.length; blockIndex += 1) {
+        const children = resolvePdfObject(
+          codeNodes[blockIndex].get(PDFLib.PDFName.of("K")),
+          context
+        );
+        const childObjects = children instanceof PDFLib.PDFArray
+          ? Array.from({ length: children.size() }, (_, index) => children.get(index))
+          : [children];
+        const lines = codeBlocks[blockIndex];
+
+        if (childObjects.length !== lines.length) {
+          throw new Error("PDF neobsahuje ocakavany pocet riadkov kodu.");
+        }
+
+        for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+          const markedContent = findMarkedContentTarget(
+            childObjects[lineIndex],
+            context
+          );
+
+          if (!markedContent) {
+            throw new Error("Riadok kodu sa nepodarilo priradit k PDF.");
+          }
+
+          targets.push({
+            mcid: markedContent.mcid,
+            pageReference: markedContent.pageReference,
+            text: `${lines[lineIndex]}\n`
+          });
+        }
+      }
+
+      return targets;
+    }
+
+    function patchCodeTextStreams(pdfDocument, targets) {
+      const context = pdfDocument.context;
+      const targetsByPage = new Map();
+      let patchCount = 0;
+
+      for (const target of targets) {
+        const pageKey = target.pageReference.toString();
+
+        if (!targetsByPage.has(pageKey)) {
+          targetsByPage.set(pageKey, new Map());
+        }
+
+        targetsByPage.get(pageKey).set(target.mcid, target.text);
+      }
+
+      for (const page of pdfDocument.getPages()) {
+        const pageTargets = targetsByPage.get(page.ref.toString());
+
+        if (!pageTargets) {
+          continue;
+        }
+
+        const contentsObject = page.node.get(PDFLib.PDFName.of("Contents"));
+        const resolvedContents = resolvePdfObject(contentsObject, context);
+        const contentObjects = resolvedContents instanceof PDFLib.PDFArray
+          ? Array.from(
+              { length: resolvedContents.size() },
+              (_, index) => resolvedContents.get(index)
+            )
+          : [contentsObject];
+        const updatedContentObjects = [];
+
+        for (const contentObject of contentObjects) {
+          const stream = resolvePdfObject(contentObject, context);
+
+          if (!(stream instanceof PDFLib.PDFRawStream)) {
+            updatedContentObjects.push(contentObject);
+            continue;
+          }
+
+          const decodedBytes = PDFLib.decodePDFRawStream(stream).decode();
+          const originalText = pdfBytesToBinaryString(decodedBytes);
+          const updatedText = originalText.replace(
+            /(\/[A-Za-z0-9]+\s*<<\s*\/MCID\s+(\d+)\s*>>\s*BDC)([\s\S]*?)(\r?\nEMC)/g,
+            (match, start, id, body, end) => {
+              const exactText = pageTargets.get(Number(id));
+
+              if (exactText === undefined) {
+                return match;
+              }
+
+              patchCount += 1;
+
+              return `${start}
+/Span <</ActualText ${PDFLib.PDFHexString.fromText(exactText).toString()}>> BDC${body}
+EMC${end}`;
+            }
+          );
+
+          if (updatedText === originalText) {
+            updatedContentObjects.push(contentObject);
+            continue;
+          }
+
+          const updatedStream = context.flateStream(
+            binaryStringToPdfBytes(updatedText)
+          );
+
+          updatedContentObjects.push(context.register(updatedStream));
+        }
+
+        if (resolvedContents instanceof PDFLib.PDFArray) {
+          page.node.set(
+            PDFLib.PDFName.of("Contents"),
+            context.obj(updatedContentObjects)
+          );
+        } else {
+          page.node.set(
+            PDFLib.PDFName.of("Contents"),
+            updatedContentObjects[0]
+          );
+        }
+      }
+
+      if (patchCount !== targets.length) {
+        throw new Error("Nie vsetky riadky kodu sa podarilo zapisat do PDF.");
+      }
+    }
+
+    async function preserveCodeTextInPdf(pdfBytes, codeBlocks) {
+      if (!codeBlocks.length) {
+        return pdfBytes;
+      }
+
+      const pdfDocument = await PDFLib.PDFDocument.load(pdfBytes);
+      const targets = collectCodeLineTargets(pdfDocument, codeBlocks);
+
+      patchCodeTextStreams(pdfDocument, targets);
+
+      // Acrobat uprednostnuje tagovanu strukturu a odstranuje uvodne medzery.
+      // Zalozky su samostatne PDF Outlines, preto po odstraneni tagov zostanu zachovane.
+      pdfDocument.catalog.delete(PDFLib.PDFName.of("StructTreeRoot"));
+      pdfDocument.catalog.delete(PDFLib.PDFName.of("MarkInfo"));
+
+      return pdfDocument.save();
     }
 
     function downloadServerPdf(blob, filename) {
@@ -1504,6 +1857,7 @@ print(response.json())
       }
 
       const filename = getSafePdfName();
+      const pdfRequest = buildServerPdfHtml();
       const response = await fetch(`${pdfApiUrl}/pdf`, {
         method: "POST",
         headers: {
@@ -1511,7 +1865,7 @@ print(response.json())
         },
         body: JSON.stringify({
           filename,
-          html: buildServerPdfHtml()
+          html: pdfRequest.html
         })
       });
 
@@ -1528,7 +1882,16 @@ print(response.json())
         throw new Error(message);
       }
 
-      downloadServerPdf(await response.blob(), filename);
+      const originalPdf = new Uint8Array(await response.arrayBuffer());
+      const finalPdf = await preserveCodeTextInPdf(
+        originalPdf,
+        pdfRequest.codeBlocks
+      );
+
+      downloadServerPdf(
+        new Blob([finalPdf], { type: "application/pdf" }),
+        filename
+      );
     }
 
     function renderToc(headings) {
