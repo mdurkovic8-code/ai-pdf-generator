@@ -1454,20 +1454,6 @@ print(response.json())
       return `${title || "ucebne-skripta"}.pdf`;
     }
 
-    function buildCopySafePreviewHtml() {
-      const printablePreview = preview.cloneNode(true);
-
-      printablePreview.querySelectorAll(".code-block pre code").forEach((codeElement) => {
-        // Nulová šírka form feedu zabráni PDF prehliadaču zahodiť úvodné medzery pri kopírovaní.
-        codeElement.textContent = codeElement.textContent
-          .split("\n")
-          .map((line) => /^[\t ]+/.test(line) ? `\f${line}` : line)
-          .join("\n");
-      });
-
-      return printablePreview.innerHTML;
-    }
-
     function buildServerPdfHtml() {
       const styles = Array.from(document.querySelectorAll("style"))
         .map((style) => style.textContent)
@@ -1488,7 +1474,7 @@ print(response.json())
             <main class="app">
               <section class="preview-shell">
                 <article class="paper">
-                  <div class="doc">${buildCopySafePreviewHtml()}</div>
+                  <div class="doc">${preview.innerHTML}</div>
                 </article>
               </section>
             </main>
