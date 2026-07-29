@@ -1469,7 +1469,6 @@ print(response.json())
 
         const lines = code.textContent.replace(/\r\n/g, "\n").split("\n");
         const fragment = document.createDocumentFragment();
-        const blockMarker = `PDF_CODE_BLOCK_${String(codeBlocks.length).padStart(4, "0")}`;
 
         codeBlocks.push(lines);
 
@@ -1489,16 +1488,8 @@ print(response.json())
           figure.setAttribute(attribute.name, attribute.value);
         }
 
-        figure.setAttribute("aria-label", blockMarker);
-
         while (block.firstChild) {
           figure.appendChild(block.firstChild);
-        }
-
-        const label = figure.querySelector(".code-label");
-
-        if (label) {
-          label.setAttribute("aria-hidden", "true");
         }
 
         block.replaceWith(figure);
@@ -1571,18 +1562,38 @@ print(response.json())
       return bytes;
     }
 
-    function decodePdfStructureText(object, context) {
+    function findPdfCodeNode(object, context) {
       const resolved = resolvePdfObject(object, context);
 
-      return typeof resolved?.decodeText === "function"
-        ? resolved.decodeText()
-        : "";
+      if (resolved instanceof PDFLib.PDFArray) {
+        for (let index = 0; index < resolved.size(); index += 1) {
+          const codeNode = findPdfCodeNode(resolved.get(index), context);
+
+          if (codeNode) {
+            return codeNode;
+          }
+        }
+
+        return null;
+      }
+
+      if (!(resolved instanceof PDFLib.PDFDict)) {
+        return null;
+      }
+
+      const role = resolvePdfObject(resolved.get(PDFLib.PDFName.of("S")), context);
+
+      if (role instanceof PDFLib.PDFName && role.toString() === "/Code") {
+        return resolved;
+      }
+
+      return findPdfCodeNode(resolved.get(PDFLib.PDFName.of("K")), context);
     }
 
-    function collectBlockFigures(pdfDocument, blockCount) {
+    function collectBlockCodeNodes(pdfDocument) {
       const context = pdfDocument.context;
       const structureRoot = pdfDocument.catalog.get(PDFLib.PDFName.of("StructTreeRoot"));
-      const blockFigures = Array.from({ length: blockCount }, () => []);
+      const codeNodes = [];
 
       function walk(object) {
         const resolved = resolvePdfObject(object, context);
@@ -1601,20 +1612,15 @@ print(response.json())
         const role = resolvePdfObject(resolved.get(PDFLib.PDFName.of("S")), context);
 
         if (role instanceof PDFLib.PDFName && role.toString() === "/Figure") {
-          const altText = decodePdfStructureText(
-            resolved.get(PDFLib.PDFName.of("Alt")),
+          const codeNode = findPdfCodeNode(
+            resolved.get(PDFLib.PDFName.of("K")),
             context
           );
-          const markerMatch = /^PDF_CODE_BLOCK_(\d+)$/.exec(altText);
 
-          if (markerMatch) {
-            const blockIndex = Number(markerMatch[1]);
-
-            if (blockIndex < blockFigures.length) {
-              blockFigures[blockIndex].push(resolved);
-            }
-            return;
+          if (codeNode) {
+            codeNodes.push(codeNode);
           }
+          return;
         }
 
         walk(resolved.get(PDFLib.PDFName.of("K")));
@@ -1624,32 +1630,30 @@ print(response.json())
         walk(structureRoot);
       }
 
-      return blockFigures;
+      return codeNodes;
     }
 
-    function collectMarkedContentTargets(
-      object,
-      context,
-      inheritedPageReference = null,
-      targets = []
-    ) {
+    function findMarkedContentTarget(object, context, inheritedPageReference = null) {
       const resolved = resolvePdfObject(object, context);
 
       if (resolved instanceof PDFLib.PDFArray) {
         for (let index = 0; index < resolved.size(); index += 1) {
-          collectMarkedContentTargets(
+          const target = findMarkedContentTarget(
             resolved.get(index),
             context,
-            inheritedPageReference,
-            targets
+            inheritedPageReference
           );
+
+          if (target) {
+            return target;
+          }
         }
 
-        return targets;
+        return null;
       }
 
       if (!(resolved instanceof PDFLib.PDFDict)) {
-        return targets;
+        return null;
       }
 
       const ownPageReference = resolved.get(PDFLib.PDFName.of("Pg"));
@@ -1662,114 +1666,62 @@ print(response.json())
       );
 
       if (pageReference && markedContentId instanceof PDFLib.PDFNumber) {
-        targets.push({
+        return {
           mcid: Number(markedContentId.toString()),
           pageReference
-        });
-        return targets;
+        };
       }
 
       const child = resolvePdfObject(resolved.get(PDFLib.PDFName.of("K")), context);
 
       if (pageReference && child instanceof PDFLib.PDFNumber) {
-        targets.push({
+        return {
           mcid: Number(child.toString()),
           pageReference
-        });
-        return targets;
+        };
       }
 
-      return collectMarkedContentTargets(
-        child,
-        context,
-        pageReference,
-        targets
-      );
-    }
-
-    function findCodeLineObjects(figure, context, expectedLineCount) {
-      let bestCandidate = null;
-
-      function inspect(object, depth = 0) {
-        const resolved = resolvePdfObject(object, context);
-
-        if (resolved instanceof PDFLib.PDFArray) {
-          const objects = Array.from(
-            { length: resolved.size() },
-            (_, index) => resolved.get(index)
-          );
-          const allHaveMarkedContent = objects.length > 0
-            && objects.every(
-              (child) => collectMarkedContentTargets(child, context).length > 0
-            );
-
-          if (
-            allHaveMarkedContent
-            && objects.length <= expectedLineCount
-            && (
-              !bestCandidate
-              || objects.length > bestCandidate.objects.length
-              || (
-                objects.length === bestCandidate.objects.length
-                && depth < bestCandidate.depth
-              )
-            )
-          ) {
-            bestCandidate = { depth, objects };
-          }
-
-          for (const child of objects) {
-            inspect(child, depth + 1);
-          }
-          return;
-        }
-
-        if (resolved instanceof PDFLib.PDFDict) {
-          inspect(resolved.get(PDFLib.PDFName.of("K")), depth + 1);
-        }
-      }
-
-      inspect(figure.get(PDFLib.PDFName.of("K")));
-
-      return bestCandidate?.objects || [];
+      return findMarkedContentTarget(child, context, pageReference);
     }
 
     function collectCodeLineTargets(pdfDocument, codeBlocks) {
       const context = pdfDocument.context;
-      const blockFigures = collectBlockFigures(pdfDocument, codeBlocks.length);
+      const codeNodes = collectBlockCodeNodes(pdfDocument);
       const targets = [];
 
-      if (blockFigures.some((figures) => figures.length === 0)) {
+      if (codeNodes.length !== codeBlocks.length) {
         throw new Error("PDF neobsahuje ocakavanu strukturu kodovych blokov.");
       }
 
-      for (let blockIndex = 0; blockIndex < blockFigures.length; blockIndex += 1) {
-        const lines = codeBlocks[blockIndex];
-        const lineObjects = blockFigures[blockIndex].flatMap(
-          (figure) => findCodeLineObjects(figure, context, lines.length)
+      for (let blockIndex = 0; blockIndex < codeNodes.length; blockIndex += 1) {
+        const children = resolvePdfObject(
+          codeNodes[blockIndex].get(PDFLib.PDFName.of("K")),
+          context
         );
+        const childObjects = children instanceof PDFLib.PDFArray
+          ? Array.from({ length: children.size() }, (_, index) => children.get(index))
+          : [children];
+        const lines = codeBlocks[blockIndex];
 
-        if (lineObjects.length !== lines.length) {
+        if (childObjects.length !== lines.length) {
           throw new Error("PDF neobsahuje ocakavany pocet riadkov kodu.");
         }
 
         for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-          const markedContents = collectMarkedContentTargets(
-            lineObjects[lineIndex],
+          const markedContent = findMarkedContentTarget(
+            childObjects[lineIndex],
             context
           );
 
-          if (!markedContents.length) {
+          if (!markedContent) {
             throw new Error("Riadok kodu sa nepodarilo priradit k PDF.");
           }
 
-          for (let partIndex = 0; partIndex < markedContents.length; partIndex += 1) {
-            targets.push({
-              mcid: markedContents[partIndex].mcid,
-              pageReference: markedContents[partIndex].pageReference,
-              text: partIndex === 0 ? `${lines[lineIndex]}\n` : ""
-            });
-          }
+          targets.push({
+            mcid: markedContent.mcid,
+            pageReference: markedContent.pageReference,
+            text: `${lines[lineIndex]}\n`
+          });
         }
       }
 
