@@ -680,6 +680,7 @@
     }
 
     .code-block {
+      position: relative;
       margin: 16px 0;
       border-radius: 8px;
       overflow: hidden;
@@ -688,6 +689,40 @@
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
       page-break-inside: avoid;
       break-inside: avoid-page;
+    }
+
+    .code-copy-button {
+      position: absolute;
+      top: 6px;
+      right: 10px;
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid #afd2e8;
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--brand-dark);
+      font: inherit;
+      font-size: 11px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .code-block.has-code-copy:not(.has-code-label) pre {
+      padding-top: 48px;
+    }
+
+    .code-block.has-code-copy .code-label {
+      padding-right: 100px;
+    }
+
+    .code-copy-button:hover {
+      background: #ffffff;
+      border-color: var(--brand);
+    }
+
+    .code-copy-button:focus-visible {
+      outline: 2px solid var(--brand);
+      outline-offset: 2px;
     }
 
     .code-label {
@@ -940,6 +975,14 @@
         break-inside: avoid-page;
       }
 
+      .code-copy-button {
+        display: none !important;
+      }
+
+      .code-block.has-code-copy:not(.has-code-label) pre {
+        padding-top: 16px;
+      }
+
       .footer {
         position: running(footer);
       }
@@ -998,6 +1041,7 @@ print(response.json())
         <button class="btn btn-secondary" id="bookmarkBtn" type="button" title="Vybrať uložené PDF a doplniť navigačné záložky">Doplniť záložky</button>
         <button class="btn btn-secondary" id="sampleBtn" type="button">Vložiť ukážku</button>
         <button class="btn btn-secondary" id="clearBtn" type="button">Vyčistiť</button>
+        <button class="btn btn-secondary" id="sourceDownloadBtn" type="button">Stiahnuť zdroj</button>
         <input id="pdfInput" type="file" accept="application/pdf,.pdf" hidden>
       </div>
 
@@ -1031,6 +1075,7 @@ print(response.json())
     const serverExportBtn = document.getElementById("serverExportBtn");
     const printBtn = document.getElementById("printBtn");
     const bookmarkBtn = document.getElementById("bookmarkBtn");
+    const sourceDownloadBtn = document.getElementById("sourceDownloadBtn");
     const pdfInput = document.getElementById("pdfInput");
     const bookmarkStatus = document.getElementById("bookmarkStatus");
     const sampleBtn = document.getElementById("sampleBtn");
@@ -1454,11 +1499,100 @@ print(response.json())
       return `${title || "ucebne-skripta"}.pdf`;
     }
 
+    function getSourceFilename() {
+      return getSafePdfName().replace(/\.pdf$/i, "-zdroj.md");
+    }
+
+    function downloadSourceDocument() {
+      if (!source.value.trim()) {
+        throw new Error("Najprv vlož text dokumentu.");
+      }
+
+      const blob = new Blob([source.value], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download = getSourceFilename();
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function copyCodeText(text) {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const helper = document.createElement("textarea");
+
+      helper.value = text;
+      helper.setAttribute("readonly", "");
+      helper.style.position = "fixed";
+      helper.style.opacity = "0";
+      document.body.appendChild(helper);
+      helper.select();
+
+      const copied = document.execCommand("copy");
+
+      helper.remove();
+
+      if (!copied) {
+        throw new Error("Kód sa nepodarilo skopírovať.");
+      }
+    }
+
+    function addCodeCopyControls() {
+      for (const block of preview.querySelectorAll(".code-block")) {
+        const code = block.querySelector("pre code");
+
+        if (!code) {
+          continue;
+        }
+
+        const button = document.createElement("button");
+
+        block.classList.add("has-code-copy");
+        block.classList.toggle("has-code-label", Boolean(block.querySelector(".code-label")));
+        button.className = "code-copy-button";
+        button.type = "button";
+        button.textContent = "Kopírovať";
+        button.title = "Skopírovať kód bez straty znakov a odsadenia";
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+
+          try {
+            await copyCodeText(code.textContent.replace(/\r\n/g, "\n"));
+            button.textContent = "Skopírované";
+            setBookmarkStatus("Kód bol skopírovaný presne podľa zdrojového textu.", "success");
+          } catch (error) {
+            setBookmarkStatus(error.message || "Kód sa nepodarilo skopírovať.", "error");
+          } finally {
+            setTimeout(() => {
+              button.disabled = false;
+              button.textContent = "Kopírovať";
+            }, 1400);
+          }
+        });
+        block.appendChild(button);
+      }
+    }
+
     function prepareServerPdfContent() {
       const container = document.createElement("div");
       const codeBlocks = [];
 
       container.innerHTML = preview.innerHTML;
+
+      for (const button of container.querySelectorAll(".code-copy-button")) {
+        button.remove();
+      }
+
+      for (const block of container.querySelectorAll(".code-block")) {
+        block.classList.remove("has-code-copy", "has-code-label");
+      }
 
       for (const block of container.querySelectorAll(".code-block")) {
         const code = block.querySelector("pre code");
@@ -2300,6 +2434,8 @@ EMC${end}`;
           </footer>
         </section>
       `;
+
+      addCodeCopyControls();
     }
 
     [source].forEach((element) => {
@@ -2326,6 +2462,14 @@ EMC${end}`;
       }
     });
     printBtn.addEventListener("click", () => window.print());
+    sourceDownloadBtn.addEventListener("click", () => {
+      try {
+        downloadSourceDocument();
+        setBookmarkStatus("Zdrojový dokument bol stiahnutý.", "success");
+      } catch (error) {
+        setBookmarkStatus(error.message || "Zdroj sa nepodarilo stiahnuť.", "error");
+      }
+    });
     bookmarkBtn.addEventListener("click", () => {
       pdfInput.value = "";
       pdfInput.click();
